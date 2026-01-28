@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Suika / Merge Drop</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- HUD overlay -->
+    <div class="hud">
+      <div class="hud-card">
+        <div id="labelScore" class="label">Score</div>
+        <div id="scoreValue" class="value">0</div>
+      </div>
+
+      <div class="hud-card">
+        <div id="labelNext" class="label">Next</div>
+        <div class="next-row">
+          <div id="nextBadge" class="next-badge">?</div>
+          <div id="nextName" class="next-name">—</div>
+        </div>
+      </div>
+
+      <div class="hud-actions">
+        <select id="langSelect" class="select" aria-label="Language">
+          <option value="en">English</option>
+          <option value="ar">العربية</option>
+        </select>
+        <button id="restartBtn" class="btn">Restart</button>
+      </div>
+    </div>
+
+    <!-- Tip overlay -->
+    <div class="tip" style="display: none;">
+      <div id="tipLine1" class="line"></div>
+      <div id="tipLine2" class="line"></div>
+    </div>
+
+    <!-- Game over modal -->
+    <div id="gameOverModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div id="gameOverTitle" class="modal-title">Game Over</div>
+        <div class="modal-score">
+          <span id="finalScoreLabel" class="muted">Final Score:</span>
+          <span id="finalScore">0</span>
+        </div>
+        <div class="modal-actions">
+          <button id="playAgainBtn" class="btn primary">Play Again</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./main.js"></script>
+</body>
+</html>
