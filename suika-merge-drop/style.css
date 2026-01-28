@@ -24,6 +24,19 @@ body {
   touch-action: none;
 }
 
+/* 禁用全站文字选择 */
+html, body, * {
+  -webkit-user-select: none; /* Safari / iOS */
+  -moz-user-select: none;    /* Firefox */
+  -ms-user-select: none;     /* old Edge */
+  user-select: none;         /* 标准 */
+}
+
+/* 可选：在移动端也尽量避免长按弹出选择/菜单（iOS 相关） */
+* {
+  -webkit-touch-callout: none; /* iOS 长按菜单 */
+}
+
 .stage {
   position: fixed;
   inset: 0;
