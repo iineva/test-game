@@ -210,3 +210,10 @@ html, body, * {
 * {
   -webkit-touch-callout: none!important; /* iOS 长按菜单 */
 }
+
+/* 禁止长按选中、复制菜单（iOS / Android 通用） */
+* {
+  -webkit-touch-callout: none; /* iOS：禁止长按弹出菜单 */
+  -webkit-user-select: none;  /* Safari */
+  user-select: none;          /* 标准 */
+}
