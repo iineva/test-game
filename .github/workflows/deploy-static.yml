@@ -1,0 +1,30 @@
+name: Build Static Projects
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build-static:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project_dir:
+          - suika-merge-drop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage static project
+        run: |
+          mkdir -p "_site/${{ matrix.project_dir }}"
+          cp -R "${{ matrix.project_dir }}/." "_site/${{ matrix.project_dir }}/"
+
+      - name: Upload static artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.project_dir }}
+          path: _site
