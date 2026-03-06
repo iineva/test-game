@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import { AvatarScene } from "./components/AvatarScene";
 
 type Role = "user" | "assistant" | "system";
@@ -12,6 +12,7 @@ type Config = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  transcriptionModel: string;
   systemPrompt: string;
 };
 
@@ -59,6 +60,7 @@ const defaultConfig: Config = {
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
+  transcriptionModel: "gpt-4o-mini-transcribe",
   systemPrompt: "你是一个亲和、自然、简洁的 3D 数字人助手，请用中文与用户对话。",
 };
 
@@ -69,6 +71,15 @@ const welcomeMessage: ChatMessage = {
 
 function getSpeechRecognitionConstructor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function canRecordAudio() {
+  return (
+    typeof window !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== "undefined"
+  );
 }
 
 export default function App() {
@@ -84,9 +95,15 @@ export default function App() {
   const [inputMode, setInputMode] = useState<"voice" | "text">("voice");
   const [isListening, setIsListening] = useState(false);
   const [voiceCaptureMode, setVoiceCaptureMode] = useState<VoiceCaptureMode>("idle");
-  const [voiceSupported] = useState(() => typeof window !== "undefined" && !!getSpeechRecognitionConstructor());
+  const [voiceSupported] = useState(
+    () => typeof window !== "undefined" && (!!getSpeechRecognitionConstructor() || canRecordAudio()),
+  );
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const fallbackModeRef = useRef<Exclude<VoiceCaptureMode, "idle"> | null>(null);
   const stopRequestedRef = useRef(false);
   const longPressTimerRef = useRef<number | null>(null);
   const holdTriggeredRef = useRef(false);
@@ -128,6 +145,7 @@ export default function App() {
         baseUrl: parsed.baseUrl || defaultConfig.baseUrl,
         apiKey: parsed.apiKey || "",
         model: parsed.model || defaultConfig.model,
+        transcriptionModel: parsed.transcriptionModel || defaultConfig.transcriptionModel,
         systemPrompt: parsed.systemPrompt || defaultConfig.systemPrompt,
       });
     } catch {
@@ -161,6 +179,45 @@ export default function App() {
         window.clearTimeout(longPressTimerRef.current);
       }
       recognitionRef.current?.stop();
+      mediaRecorderRef.current?.stop();
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    const preventGestureZoom = (event: Event) => {
+      event.preventDefault();
+    };
+    const preventBrowserWheelZoom = (event: WheelEvent) => {
+      if (event.ctrlKey) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener("gesturestart", preventGestureZoom, { passive: false });
+    document.addEventListener("gesturechange", preventGestureZoom, { passive: false });
+    document.addEventListener("gestureend", preventGestureZoom, { passive: false });
+    window.addEventListener("wheel", preventBrowserWheelZoom, { passive: false });
+
+    return () => {
+      document.removeEventListener("gesturestart", preventGestureZoom);
+      document.removeEventListener("gesturechange", preventGestureZoom);
+      document.removeEventListener("gestureend", preventGestureZoom);
+      window.removeEventListener("wheel", preventBrowserWheelZoom);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncViewportHeight = () => {
+      document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
+    };
+
+    syncViewportHeight();
+    window.addEventListener("resize", syncViewportHeight);
+
+    return () => {
+      window.removeEventListener("resize", syncViewportHeight);
+      document.documentElement.style.removeProperty("--app-height");
     };
   }, []);
 
@@ -221,12 +278,144 @@ export default function App() {
     }
   }
 
-  function startVoiceInput(mode: Exclude<VoiceCaptureMode, "idle">) {
+  async function transcribeAudio(audioBlob: Blob) {
+    const currentConfig = configRef.current;
+
+    if (
+      !currentConfig.baseUrl.trim() ||
+      !currentConfig.apiKey.trim() ||
+      !currentConfig.transcriptionModel.trim()
+    ) {
+      throw new Error("请先在设置里填写 API Base URL、API Key 和 语音识别模型。");
+    }
+
+    const extension = audioBlob.type.includes("mp4") ? "m4a" : "webm";
+    const file = new File([audioBlob], `voice-input.${extension}`, {
+      type: audioBlob.type || "audio/webm",
+    });
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("model", currentConfig.transcriptionModel);
+
+    const response = await fetch(`${normalizeBaseUrl(currentConfig.baseUrl)}/audio/transcriptions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${currentConfig.apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const details = await safeReadText(response);
+      throw new Error(`语音识别失败: ${response.status} ${details || response.statusText}`);
+    }
+
+    const data = (await response.json()) as { text?: string };
+    const transcript = data.text?.trim();
+
+    if (!transcript) {
+      throw new Error("语音识别结果为空。");
+    }
+
+    return transcript;
+  }
+
+  async function startRecorderVoiceInput(mode: Exclude<VoiceCaptureMode, "idle">) {
+    if (isListening) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType =
+        MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : MediaRecorder.isTypeSupported("audio/mp4")
+            ? "audio/mp4"
+            : "";
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recordedChunksRef.current = [];
+      fallbackModeRef.current = mode;
+      stopRequestedRef.current = false;
+      setVoiceCaptureMode(mode);
+      setIsListening(true);
+      setStatus(mode === "continuous" ? "持续录音中" : "录音中");
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onerror = () => {
+        setIsListening(false);
+        setVoiceCaptureMode("idle");
+        setStatus("语音输入失败");
+        pushMessage({
+          role: "system",
+          content: "录音失败，请确认微信已授权麦克风权限。",
+        });
+      };
+
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(recordedChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+
+        mediaRecorderRef.current = null;
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        recordedChunksRef.current = [];
+        setIsListening(false);
+
+        if (!audioBlob.size) {
+          setVoiceCaptureMode("idle");
+          setStatus("待开始语音");
+          return;
+        }
+
+        try {
+          setStatus("识别语音中");
+          const transcript = await transcribeAudio(audioBlob);
+          setInput(transcript);
+          setVoiceCaptureMode("idle");
+          setStatus("待开始语音");
+          await submitContent(transcript);
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : "语音识别失败，请检查配置。";
+          pushMessage({ role: "system", content: errorMessage });
+          setVoiceCaptureMode("idle");
+          setStatus("语音输入失败");
+        } finally {
+          fallbackModeRef.current = null;
+          stopRequestedRef.current = false;
+        }
+      };
+
+      recorder.start();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "无法访问麦克风，请检查浏览器权限。";
+      setVoiceCaptureMode("idle");
+      setIsListening(false);
+      setStatus("语音输入失败");
+      pushMessage({ role: "system", content: `录音失败: ${errorMessage}` });
+    }
+  }
+
+  async function startVoiceInput(mode: Exclude<VoiceCaptureMode, "idle">) {
     const Recognition = getSpeechRecognitionConstructor();
     if (!Recognition) {
+      if (canRecordAudio()) {
+        await startRecorderVoiceInput(mode);
+        return;
+      }
+
       pushMessage({
         role: "system",
-        content: "当前浏览器不支持语音输入，请切换到文字输入。",
+        content: "当前浏览器既不支持语音识别，也不支持录音，请切换到文字输入。",
       });
       setInputMode("text");
       return;
@@ -337,6 +526,9 @@ export default function App() {
     stopRequestedRef.current = true;
     setVoiceCaptureMode(nextMode);
     recognitionRef.current?.stop();
+    if (mediaRecorderRef.current?.state !== "inactive") {
+      mediaRecorderRef.current?.stop();
+    }
     setIsListening(false);
     setStatus(nextMode === "continuous" ? "持续语音中" : "待开始语音");
   }
@@ -363,7 +555,9 @@ export default function App() {
     setStatus(voiceSupported ? "待开始语音" : "当前浏览器不支持语音");
   }
 
-  function handleVoicePressStart() {
+  function handleVoicePressStart(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+
     if (!voiceSupported || loading) return;
 
     holdTriggeredRef.current = false;
@@ -378,7 +572,9 @@ export default function App() {
     }, 350);
   }
 
-  function handleVoicePressEnd() {
+  function handleVoicePressEnd(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+
     if (longPressTimerRef.current) {
       window.clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
@@ -665,6 +861,15 @@ export default function App() {
                     onChange={(event) => updateConfig("model", event.target.value)}
                     type="text"
                     placeholder="gpt-4o-mini"
+                  />
+                </label>
+                <label>
+                  语音识别模型
+                  <input
+                    value={config.transcriptionModel}
+                    onChange={(event) => updateConfig("transcriptionModel", event.target.value)}
+                    type="text"
+                    placeholder="gpt-4o-mini-transcribe"
                   />
                 </label>
                 <label>
